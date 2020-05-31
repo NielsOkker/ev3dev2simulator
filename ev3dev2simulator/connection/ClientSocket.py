@@ -1,10 +1,10 @@
 import json
 import socket
 import time
-from typing import Any
+from typing import Any, Optional
 
-from ev3dev2simulator.config.config import get_config
-from ev3dev2simulator.connection.message import MotorCommand, SoundCommand, DataRequest, LedCommand
+from ev3dev2simulator.config.config import get_simulation_settings, load_config
+from ev3dev2simulator.connection.message.Command import Command
 
 
 class ClientSocket:
@@ -13,77 +13,34 @@ class ClientSocket:
     This connection is a TCP stream.
     """
 
-
     def __init__(self):
-        port = get_config().get_data()['exec_settings']['socket_port']
+        load_config(None)
+        port = get_simulation_settings()['exec_settings']['socket_port']
 
         self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.client.connect(('localhost', port))
 
         time.sleep(1)
 
-
-    def send_motor_command(self, command: MotorCommand) -> float:
+    def send_command(self, command: Command, wait_for_response=False) -> Optional[object]:
         """
-        Serialise and send the given MotorCommand to the simulator.
+        Serialise and send the given Command to the simulator.
         :param command: to send.
+        :param wait_for_response: set to True if you expect a result and want to wait for it blocking.
         """
 
         jsn = self._serialize(command)
         self.client.send(jsn)
 
-        return self._wait_for_response()
+        if wait_for_response:
+            while True:
+                data = self.client.recv(32)
 
+                if data:
+                    return self._deserialize(data)
 
-    def send_led_command(self, command: LedCommand):
-        """
-        Serialise and send the given MotorCommand to the simulator.
-        :param command: to send.
-        """
-
-        jsn = self._serialize(command)
-        self.client.send(jsn)
-
-
-    def send_sound_command(self, command: SoundCommand):
-        """
-        Serialise and send the given SoundCommand to the simulator.
-        :param command: to send.
-        """
-
-        jsn = self._serialize(command)
-        self.client.send(jsn)
-
-
-    def send_data_request(self, request: DataRequest) -> Any:
-        """
-        Serialise and send the given DataRequest to the simulator.
-        Block while waiting for an answer. Return the answer when received.
-        :param request: to send.
-        :return: the answer to the given request.
-        """
-
-        jsn = self._serialize(request)
-        self.client.send(jsn)
-
-        return self._wait_for_response()
-
-
-    def _wait_for_response(self) -> Any:
-        """
-        Wait until the simulator responds with a message and deserialize the message.
-        This function blocks until a response has been received.
-        :return: the value of the responded message.
-        """
-
-        while True:
-            data = self.client.recv(32)
-
-            if data:
-                return self._deserialize(data)
-
-
-    def _serialize(self, message: Any) -> bytes:
+    @staticmethod
+    def _serialize(message: Any) -> bytes:
         """
         Serialize the given message so it can be send via a stream channel.
         :param message: to be serialized.
@@ -93,12 +50,12 @@ class ClientSocket:
         obj_dict = message.serialize()
 
         jsn = json.dumps(obj_dict)
-        jsn = jsn.ljust(128, '#')
+        jsn = jsn.ljust(get_simulation_settings()['exec_settings']['message_size'], '#')
 
         return str.encode(jsn)
 
-
-    def _deserialize(self, data: bytes) -> Any:
+    @staticmethod
+    def _deserialize(data: bytes) -> Any:
         """
         Deserialize the given data.
         :param data: to be deserialized.
@@ -111,8 +68,11 @@ class ClientSocket:
         return obj_dict['value']
 
 
-client_socket = ClientSocket()
+client_socket = None
 
 
 def get_client_socket() -> ClientSocket:
+    global client_socket
+    if not client_socket:
+        client_socket = ClientSocket()
     return client_socket
