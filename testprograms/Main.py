@@ -5,7 +5,7 @@ from ev3dev2.led import Leds
 from ev3dev2.motor import MoveTank, OUTPUT_A, OUTPUT_D, SpeedPercent
 from ev3dev2.sensor.lego import ColorSensor
 from ev3dev2.sensor.lego import TouchSensor
-from testprograms.BluethoothHelper import BluetoothHelper
+from testprograms.BluetoothHelper import BluetoothHelper
 
 
 def reverseRotations(rotations):
@@ -29,24 +29,23 @@ def checkCollision():
 
         reverseRotations(1)
         rotateDegrees(180)
-
         drive()
     # else:
     #     leds.set_color("LEFT", "RED")
 
 
 def checkColor():
-    if cs.color == 6:
+    if cs.color != 6:
         print('gg')
-        # leds.set_color("RIGHT", "AMBER")
+        leds.set_color("RIGHT", "AMBER")
         tank_drive.stop()
 
         reverseRotations(1)
         rotateDegrees(150)
 
         drive()
-    # else:
-    #     leds.set_color("RIGHT", "GREEN")
+    else:
+        leds.set_color("RIGHT", "GREEN")
 
 
 def check():
@@ -56,12 +55,12 @@ def check():
         # checkDistance()
 
 
-bth = BluetoothHelper()
-bth.connect_as_server()
-bth.send("Hello?")
+# bth = BluetoothHelper()
+# bth.connect_as_server()
+# bth.send("Hello?")
 
 leds = Leds()
-leds.animate_rainbow()
+# leds.animate_rainbow()
 cs = ColorSensor(INPUT_2)
 ts1 = TouchSensor(INPUT_1)
 ts4 = TouchSensor(INPUT_4)

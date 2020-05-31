@@ -1,207 +1,255 @@
-import threading
-from queue import Queue, Empty
-from typing import Any, Tuple
+import math
 
-from ev3dev2simulator.config.config import get_config
+import arcade
+import pymunk
+from pymunk.vec2d import Vec2d
+
+from ev3dev2simulator.obstacle import ColorObstacle
+from ev3dev2simulator.robotpart import BodyPart
+from ev3dev2simulator.robotpart.Arm import Arm
+from ev3dev2simulator.robotpart.Brick import Brick
+from ev3dev2simulator.robotpart.ColorSensor import ColorSensor
+from ev3dev2simulator.robotpart.Led import Led
+from ev3dev2simulator.robotpart.Speaker import Speaker
+from ev3dev2simulator.robotpart.TouchSensor import TouchSensor
+from ev3dev2simulator.robotpart.UltrasonicSensorBottom import UltrasonicSensorBottom
+from ev3dev2simulator.robotpart.UltrasonicSensorTop import UltrasonicSensor
+from ev3dev2simulator.robotpart.Wheel import Wheel
+
+from ev3dev2simulator.util.Util import calc_differential_steering_angle_x_y
+from ev3dev2simulator.config.config import debug, get_robot_config
+
+from ev3dev2simulator.visualisation.RobotPartSprite import RobotPartSprite
 
 
 class RobotState:
     """
-    Class responsible for inner-thread communication. All jobs coming from the robot
-    are stored in this class to be retrieved by the simulator for updating/rendering
-    of the simulated robot.
+    Class representing the simulated robot. This robot has a number
+    of parts defined by BodyParts and ExtraBodyParts.
     """
 
+    def __init__(self, config):
+        self.sprite_list = arcade.SpriteList[RobotPartSprite]()
+        self.side_bar_sprites = arcade.SpriteList()
 
-    def __init__(self):
-        cfg = get_config().get_data()
-        large_sim_type = get_config().is_large_sim_type()
-
-        self.address_motor_center = cfg['alloc_settings']['motor']['center'] if large_sim_type else ''
-        self.address_motor_left = cfg['alloc_settings']['motor']['left']
-        self.address_motor_right = cfg['alloc_settings']['motor']['right']
-
-        self.center_motor_queue = Queue()
-        self.left_motor_queue = Queue()
-        self.right_motor_queue = Queue()
-        self.sound_queue = Queue()
-
-        self.left_brick_left_led_color = 1
-        self.left_brick_right_led_color = 1
-
-        self.right_brick_left_led_color = 1
-        self.right_brick_right_led_color = 1
-
-        self.should_reset = False
-
+        self.sensors = {}
+        self.actuators = {}
         self.values = {}
-        self.locks = {}
+        self.led_colors = {}
+        self.bricks = []
+        self.sounds = {}
 
-        self.motor_lock = threading.Lock()
+        self.body = None
+        self.shapes = []
+        self.scale = None
 
+        if debug:
+            self.debug_shapes = []
 
-    def put_center_motor_job(self, job: float):
-        """
-        Add a new move job to the queue for the center motor.
-        :param job: to add.
-        """
+        self.x = float(config['center_x'])
+        self.y = float(config['center_y']) + 22.5
 
-        self.center_motor_queue.put_nowait(job)
-
-
-    def put_left_motor_job(self, job: float):
-        """
-        Add a new move job to the queue for the left motor.
-        :param job: to add.
-        """
-
-        self.left_motor_queue.put_nowait(job)
-
-
-    def put_right_motor_job(self, job: float):
-        """
-        Add a new move job to the queue for the right motor.
-        :param job: to add.
-        """
-
-        self.right_motor_queue.put_nowait(job)
-
-
-    def next_motor_jobs(self) -> Tuple[float, float, float]:
-        """
-        Get the next move jobs for the left and right motor from the queues.
-        :return: a floating point numbers representing the job move distances.
-        """
-
-        self.motor_lock.acquire()
+        self.wheel_distance = None
 
         try:
-            center = self.center_motor_queue.get_nowait()
-        except Empty:
-            center = None
+            self.orig_orientation = config['orientation']
+        except KeyError:
+            self.orig_orientation = 0
 
-        try:
-            left = self.left_motor_queue.get_nowait()
-        except Empty:
-            left = None
+        self.name = config['name']
+        self.is_stuck = False
 
-        try:
-            right = self.right_motor_queue.get_nowait()
-        except Empty:
-            right = None
+        parts = get_robot_config(config['type'])['parts'] if 'type' in config else config['parts']
 
-        self.motor_lock.release()
-        return center, left, right
+        for part in parts:
+            if part['type'] == 'brick':
+                brick = Brick(part, self)
+                self.bricks.append(brick)
+                self.led_colors[(brick.brick, 'led0')] = 1
+                self.actuators[(brick.brick, 'led0')] = Led((part['brick']), self, 'left',
+                                                            part['x_offset'], part['y_offset'])
+                self.led_colors[(brick.brick, 'led1')] = 1
+                self.actuators[(brick.brick, 'led1')] = Led((part['brick']), self, 'right',
+                                                            part['x_offset'], part['y_offset'])
 
+                self.actuators[(brick.brick, 'speaker')] = Speaker(int(part['brick']), self, 0, 0)
 
-    def clear_motor_jobs(self, side: str):
-        self.motor_lock.acquire()
+            elif part['type'] == 'motor':
+                wheel = Wheel(part, self)
+                self.actuators[(wheel.brick, wheel.address)] = wheel
 
-        if side == 'center':
-            self.center_motor_queue = Queue()
-        elif side == 'left':
-            self.left_motor_queue = Queue()
-        else:
-            self.right_motor_queue = Queue()
+            elif part['type'] == 'color_sensor':
+                color_sensor = ColorSensor(part, self)
+                self.sensors[(color_sensor.brick, color_sensor.address)] = color_sensor
 
-        self.motor_lock.release()
+            elif part['type'] == 'touch_sensor':
+                touch_sensor = TouchSensor(part, self)
+                self.sensors[(touch_sensor.brick, touch_sensor.address)] = touch_sensor
 
+            elif part['type'] == 'ultrasonic_sensor':
+                direction = part['direction'] if 'direction' in part else 'forward'
+                if direction == 'bottom':
+                    ultrasonic_sensor = UltrasonicSensorBottom(part, self)
+                else:
+                    ultrasonic_sensor = UltrasonicSensor(part, self)
+                self.sensors[(ultrasonic_sensor.brick, ultrasonic_sensor.address)] = ultrasonic_sensor
 
-    def put_sound_job(self, job: str):
-        """
-        Add a new sound job to the queue to be displayed.
-        :param job: to add.
-        """
-
-        self.sound_queue.put_nowait(job)
-
-
-    def next_sound_job(self) -> str:
-        """
-        Get the next sound job from the queue.
-        :return: a str representing the sound as text to be displayed.
-        """
-
-        try:
-            return self.sound_queue.get_nowait()
-        except Empty:
-            return None
-
-
-    def set_led_color(self, brick_name, led_id, color):
-        if brick_name == 'left_brick:':
-            if led_id == 'led0':
-                self.left_brick_left_led_color = color
+            elif part['type'] == 'arm':
+                arm = Arm(part, self)
+                self.side_bar_sprites.append(arm.side_bar_arm)
+                self.actuators[(arm.brick, arm.address)] = arm
             else:
-                self.left_brick_right_led_color = color
+                print("Unknown robot part in config")
 
-        else:
-            if led_id == 'led0':
-                self.right_brick_left_led_color = color
-            else:
-                self.right_brick_right_led_color = color
-
+        self.parts = []
+        self.parts.extend(list(self.get_wheels()))
+        self.parts.extend(list(self.sensors.values()))
+        self.parts.extend(self.bricks)
+        self.parts.extend(filter(lambda act: act.get_ev3type() != 'motor', list(self.actuators.values())))
 
     def reset(self):
-        """
-        Reset the data of this State
-        :return:
-        """
-
-        self.clear_motor_jobs('center')
-        self.clear_motor_jobs('left')
-        self.clear_motor_jobs('right')
-
         self.values.clear()
-        self.should_reset = False
+        self.body.position = pymunk.Vec2d(self.x * self.scale, self.y * self.scale)
+        self.body.angle = math.radians(self.orig_orientation)
+        self.body.velocity = (0, 0)
+        self.body.angular_velocity = 0
+        for obj in self.side_bar_sprites:
+            obj.reset()
+
+    def setup_pymunk_shapes(self, scale):
+        self.scale = scale
+        moment = pymunk.moment_for_box(20, (200 * scale, 300 * scale))
+
+        self.body = pymunk.Body(20, moment)
+        self.body.position = pymunk.Vec2d(self.x * scale, self.y * scale)
+
+        for part in self.parts:
+            part.setup_pymunk_shape(scale, self.body)
+            self.shapes.append(part.shape)
+
+        wheels = self.get_wheels()
+        if len(wheels) == 2:
+            wheel_pos_left = Vec2d(wheels[0].shape.center_of_gravity)
+            wheel_pos_right = Vec2d(wheels[1].shape.center_of_gravity)
+            self.wheel_distance = wheel_pos_left.get_distance(wheel_pos_right)
+        else:
+            raise RuntimeError('Currently cannot have anything other than 2 wheels')
+
+        if self.orig_orientation != 0:
+            self._rotate(math.radians(self.orig_orientation))
+
+    def setup_visuals(self, scale):
+        for part in self.parts:
+            part.setup_visuals(scale)
+            self.sprite_list.append(part.sprite)
 
 
-    def get_motor_side(self, address: str) -> str:
+    def _move_position(self, distance: Vec2d):
         """
-        Get the location of the motor on the actual robot based on its address.
-        :param address: of the motor
-        :return 'center', 'left' or 'right'
+        Move all parts of this robot by the given distance vector.
+        :param distance: to move
+        """
+        self.body.velocity = distance * 30.0
+
+    def _rotate(self, radians: float):
+        """
+        Rotate all parts of this robot by the given angle in radians.
+        :param radians to rotate
+        """
+        self.body.angle += radians
+
+    def execute_movement(self, left_ppf: float, right_ppf: float):
+        """
+        Move the robot and its parts by providing the speed of the left and right motor
+        using the differential steering principle.
+        :param left_ppf: speed in pixels per second of the left motor.
+        :param right_ppf: speed in pixels per second of the right motor.
         """
 
-        if self.address_motor_center == address:
-            return 'center'
+        distance_left = left_ppf * self.scale if left_ppf is not None else 0
+        distance_right = right_ppf * self.scale if right_ppf is not None else 0
 
-        if self.address_motor_left == address:
-            return 'left'
+        cur_angle = self.body.angle + math.radians(90)
+        diff_angle, diff_x, diff_y = calc_differential_steering_angle_x_y(self.wheel_distance,
+                                                                          distance_left,
+                                                                          distance_right, cur_angle)
+        self._rotate(diff_angle)
+        self._move_position(Vec2d(diff_x, diff_y))
 
-        if self.address_motor_right == address:
-            return 'right'
-
-
-    def load_sensor(self, sensor):
+    def execute_arm_movement(self, address: (int, str), dfp: float):
         """
-        Load the given sensor adding its default value to this state.
-        Also create a lock for the given sensor.
-        :param sensor: to load.
+        Move the robot arm by providing the speed of the center motor.
+        :param address: the address of the arm
+        :param dfp: speed in degrees per second of the center motor.
         """
+        self.actuators[address].rotate_arm(dfp)
 
-        self.values[sensor.address] = sensor.get_default_value()
-        self.locks[sensor.address] = threading.Lock()
+    def set_led_color(self, address, color):
+        self.actuators[address].set_color_texture(color)
 
-
-    def release_locks(self):
+    def set_color_obstacles(self, obstacles: [ColorObstacle]):
         """
-        Release all the locked sensor locks. This re-allows for reading
-        the sensor values.
+        Set the obstacles which can be detected by the color sensors of this robot.
+        :param obstacles: to be detected.
         """
+        for part in self.sensors.values():
+            if part.get_ev3type() == 'color_sensor':
+                part.set_sensible_obstacles(obstacles)
 
-        for lock in self.locks.values():
-            if lock.locked():
-                lock.release()
-
-
-    def get_value(self, address: str) -> Any:
+    def set_touch_obstacles(self, obstacles):
         """
-        Get the value of a sensor by its address. Blocks if the lock of
-        the requested sensor is not available.
-        :param address: of the sensor to get the value from.
-        :return: the value of the sensor.
+        Set the obstacles which can be detected by the touch sensors of this robot.
+        :param obstacles: to be detected.
         """
+        for part in self.sensors.values():
+            if part.get_ev3type() == 'touch_sensor':
+                part.set_sensible_obstacles(obstacles)
 
-        self.locks[address].acquire()
+    def set_falling_obstacles(self, obstacles):
+        """
+        Set the obstacles which can be detected by the wheel of this robot. This simulates
+        the entering of a wheel in a 'hole'. Meaning it is stuck or falling.
+        :param obstacles: to be detected.
+        """
+        for part in self.actuators.values():
+            if part.get_ev3type() == 'motor':
+                part.set_sensible_obstacles(obstacles)
+        for part in self.sensors.values():
+            if isinstance(part, UltrasonicSensorBottom):
+                part.set_sensible_obstacles(obstacles)
+
+    def get_shapes(self):
+        return self.shapes
+
+    def get_sensor(self, address):
+        return self.sensors.get(address)
+
+    def get_actuators(self):
+        return self.actuators.values()
+
+    def get_actuator(self, address):
+        return self.actuators[address]
+
+    def get_value(self, address):
         return self.values[address]
+
+    def get_wheels(self):
+        wheels = []
+        for part in self.actuators.values():
+            if part.get_ev3type() == 'motor':
+                wheels.append(part)
+        return wheels
+
+    def get_sprites(self) -> arcade.SpriteList[RobotPartSprite]:
+        return self.sprite_list
+
+    def get_bricks(self):
+        return self.bricks
+
+    def get_sensors(self) -> [BodyPart]:
+        return self.sensors.values()
+
+    def get_anchor(self) -> BodyPart:
+        if len(self.bricks) != 0:
+            return self.bricks[0]
+        return None

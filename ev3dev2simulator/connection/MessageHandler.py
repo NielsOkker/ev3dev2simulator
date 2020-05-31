@@ -1,8 +1,9 @@
 import json
-import threading
+from logging import warning
 from typing import Any
 
-from ev3dev2simulator.connection import MessageProcessor
+from ev3dev2simulator.connection.message.ConfigRequest import ConfigRequest
+from ev3dev2simulator.state import MessageProcessor
 from ev3dev2simulator.connection.message.DataRequest import DataRequest
 from ev3dev2simulator.connection.message.LedCommand import LedCommand
 from ev3dev2simulator.connection.message.RotateCommand import RotateCommand
@@ -10,15 +11,12 @@ from ev3dev2simulator.connection.message.SoundCommand import SoundCommand
 from ev3dev2simulator.connection.message.StopCommand import StopCommand
 
 
-class MessageHandler(threading.Thread):
+class MessageHandler:
 
     def __init__(self, message_processor: MessageProcessor):
-        threading.Thread.__init__(self)
-
         self.message_processor = message_processor
 
-
-    def _process(self, data: bytes) -> bytes:
+    def process(self, data: bytes) -> bytes:
         """
         Process incoming data by decoding it and sending it to the MessageProcessor.
         :param data: to process.
@@ -34,17 +32,22 @@ class MessageHandler(threading.Thread):
         if tpe == 'RotateCommand':
             return self._process_drive_command(obj_dict)
 
-        if tpe == 'StopCommand':
+        elif tpe == 'StopCommand':
             return self._process_stop_command(obj_dict)
 
-        if tpe == 'SoundCommand':
+        elif tpe == 'SoundCommand':
             return self._process_sound_command(obj_dict)
 
-        if tpe == 'LedCommand':
+        elif tpe == 'LedCommand':
             return self._process_led_command(obj_dict)
 
         elif tpe == 'DataRequest':
             return self._process_data_request(obj_dict)
+
+        elif tpe == 'ConfigRequest':
+            return self._process_config_request(obj_dict)
+        else:
+            warning(f'Unknown command type {tpe}')
 
 
     def _process_drive_command(self, d: dict) -> Any:
@@ -52,12 +55,10 @@ class MessageHandler(threading.Thread):
         Deserialize the given dictionary into a RotateCommand and send it to the MessageProcessor.
         :param d: to process.
         """
-
         command = RotateCommand(d['address'], d['speed'], d['distance'], d['stop_action'])
         value = self.message_processor.process_rotate_command(command)
 
         return self._serialize_response(value)
-
 
     def _process_stop_command(self, d: dict) -> Any:
         """
@@ -70,7 +71,6 @@ class MessageHandler(threading.Thread):
 
         return self._serialize_response(value)
 
-
     def _process_led_command(self, d: dict) -> Any:
         """
         Deserialize the given dictionary into a LedCommand and send it to the MessageProcessor.
@@ -82,18 +82,16 @@ class MessageHandler(threading.Thread):
 
         return None
 
-
     def _process_sound_command(self, d: dict) -> Any:
         """
         Deserialize the given dictionary into a SoundCommand and send it to the MessageProcessor.
         :param d: to process.
         """
 
-        command = SoundCommand(d['message'])
+        command = SoundCommand(d['message'], d['duration'], d['soundType'])
         self.message_processor.process_sound_command(command)
 
         return None
-
 
     def _process_data_request(self, d: dict) -> bytes:
         """
@@ -102,14 +100,26 @@ class MessageHandler(threading.Thread):
         :param d: to process.
         :return: a bytes object representing the serialized response.
         """
-
         request = DataRequest(d['address'])
         value = self.message_processor.process_data_request(request)
 
         return self._serialize_response(value)
 
+    def _process_config_request(self, d: dict):
+        """
+        Deserialize the given dictionary into a ConfigRequest and send it to the MessageProcessor.
+        Return a serialized response with the determined port or a 'dev_not_connected' string.
+        :param d: to process.
+        :return: a bytes object representing the serialized response.
+        """
+        request = ConfigRequest(d['kwargs'], d['class_name'])
+        value = self.message_processor.process_config_request(request)
 
-    def _serialize_response(self, value) -> bytes:
+        return self._serialize_response(value)
+
+
+    @staticmethod
+    def _serialize_response(value) -> bytes:
         """
         Serialize the given value into a bytes object containing a dictionary.
         :param value: to serialize.
